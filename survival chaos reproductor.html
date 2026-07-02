@@ -372,31 +372,24 @@ const ca  = document.getElementById('carea');
 const cv  = document.getElementById('cv');
 const ctx = cv.getContext('2d');
 
+const mapImg=new Image();
+let mapImgLoaded=false;
+mapImg.onload=()=>{mapImgLoaded=true;draw();};
+mapImg.src='survival-chaos-minimap.jpg';
+
 function resizeCanvas(){
   cv.width  = ca.clientWidth;
   cv.height = ca.clientHeight;
 }
 
-// Calcula posiciones base para los jugadores según sus equipos
-// En SC: equipo 0 (izquierda) vs equipo 1 (derecha)
+// Survival Chaos tiene 4 bases/carriles dispuestos en cuadrantes simétricos
+// (ver survival-chaos-minimap.jpg). El replay no trae el equipo real de cada
+// jugador (Reforged codifica esa tabla en un formato no documentado), así que
+// se asigna un cuadrante por jugador en vez de por equipo.
+const QUADRANTS=[{fx:.25,fy:.25},{fx:.75,fy:.25},{fx:.25,fy:.75},{fx:.75,fy:.75}];
 function calcBases(players){
-  const teams={};
-  for(const p of players){
-    const t=p.team??0;
-    if(!teams[t]) teams[t]=[];
-    teams[t].push(p);
-  }
-  const tids=Object.keys(teams).map(Number).sort();
-  const ntm=tids.length;
   S.bases={};
-  tids.forEach((tid,ti)=>{
-    const tplayers=teams[tid];
-    const xFrac=ntm===1?0.5:(ti/(ntm-1))*.8+.1; // distribuir horizontalmente 10%-90%
-    tplayers.forEach((p,pi)=>{
-      const yFrac=(pi+1)/(tplayers.length+1);
-      S.bases[p.id]={fx:xFrac, fy:yFrac};
-    });
-  });
+  players.forEach((p,i)=>{ S.bases[p.id]=QUADRANTS[i%QUADRANTS.length]; });
 }
 
 // Convierte fracción del mapa a px del canvas con zoom/pan
@@ -413,29 +406,11 @@ function draw(){
   const W=cv.width, H=cv.height;
   ctx.clearRect(0,0,W,H);
 
-  // Fondo
+  // Fondo: minimapa real extraído del mapa, o un fondo simple mientras carga
   ctx.fillStyle='#040906';
   ctx.fillRect(0,0,W,H);
-
-  // Grid de fondo (mapa)
-  ctx.strokeStyle='rgba(255,255,255,.03)';
-  ctx.lineWidth=1;
-  const gn=24;
-  for(let i=0;i<=gn;i++){
-    const xg=i/gn*W*S.zoom+S.px;
-    const yg=i/gn*H*S.zoom+S.py;
-    ctx.beginPath();ctx.moveTo(xg,0);ctx.lineTo(xg,H);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(0,yg);ctx.lineTo(W,yg);ctx.stroke();
-  }
-
-  // Línea central (división de equipos)
-  if(S.loaded){
-    const[lx]=frac2px(0.5,0), [,ly0]=frac2px(0.5,0.05), [,ly1]=frac2px(0.5,0.95);
-    ctx.strokeStyle='rgba(212,168,64,.08)';
-    ctx.lineWidth=1;
-    ctx.setLineDash([6,6]);
-    ctx.beginPath();ctx.moveTo(lx,ly0);ctx.lineTo(lx,ly1);ctx.stroke();
-    ctx.setLineDash([]);
+  if(mapImgLoaded){
+    ctx.drawImage(mapImg, S.px, S.py, W*S.zoom, H*S.zoom);
   }
 
   if(!S.loaded) return;
@@ -617,6 +592,14 @@ async function loadFile(file){
     S.dur=r.dur; S.players=r.players; S.events=r.events;
     S.ct=0; S.playing=false; S.loaded=true;
     calcBases(r.players);
+    // Arrancar con la cámara enfocada en la base del primer jugador,
+    // el usuario puede alejar el zoom con la rueda para ver el mapa completo.
+    const firstBase=S.bases[r.players[0]?.id];
+    if(firstBase){
+      S.zoom=4;
+      S.px=cv.width/2-firstBase.fx*cv.width*S.zoom;
+      S.py=cv.height/2-firstBase.fy*cv.height*S.zoom;
+    }
     document.getElementById('overlay').classList.add('hidden');
     document.getElementById('pp').textContent='▶';
     renderTL(); draw();
