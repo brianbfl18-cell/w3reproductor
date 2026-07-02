@@ -168,21 +168,25 @@ function classifyAction(aid){
 // ══════════════════════════════════════════════════════
 // INFLATE — writer/reader con await correcto
 // ══════════════════════════════════════════════════════
-async function inflate(data){
+async function inflate(data,expectedSize){
+  // Los bloques de un replay usan Z_SYNC_FLUSH (para poder transmitirse en vivo),
+  // por lo que el stream nunca llega a un BFINAL/checksum final: wr.close() siempre
+  // falla con "truncated". En cambio, leemos hasta juntar expectedSize bytes.
   const errs=[];
   for(const fmt of['deflate','deflate-raw']){
     try{
       const ds  = new DecompressionStream(fmt);
       const wr  = ds.writable.getWriter();
       const rd  = ds.readable.getReader();
-      await wr.write(data);
-      await wr.close();
+      wr.write(data).catch(()=>{});
       const chunks=[];let total=0;
-      for(;;){
+      while(total<expectedSize){
         const{done,value}=await rd.read();
         if(done)break;
         chunks.push(value);total+=value.length;
       }
+      wr.abort().catch(()=>{});
+      if(total<expectedSize) throw new Error(`solo ${total}/${expectedSize} bytes`);
       const out=new Uint8Array(total);let o=0;
       for(const c of chunks){out.set(c,o);o+=c.length;}
       return out;
@@ -210,12 +214,16 @@ async function parseW3G(file){
   const nBlk = dv.getUint32(0x2C,true);
 
   let dur=0, build=0;
-  if(hVer===2){build=dv.getUint16(0x38,true); dur=dv.getUint32(0x3C,true);}
-  else         {build=dv.getUint16(0x30,true); dur=dv.getUint32(0x34,true);}
+  if(hVer===1){build=dv.getUint16(0x38,true); dur=dv.getUint32(0x3C,true);}
+  else         {build=dv.getUint16(0x34,true); dur=dv.getUint32(0x38,true);}
 
   console.log(`[W3G] ver=${hVer} hSz=${hSz} nBlk=${nBlk} dur=${dur}ms build=${build}`);
 
-  const players = parseHeader(by,dv,0x44,hSz);
+  // Los nombres de jugadores no están en el header crudo: viven dentro del
+  // primer bloque ya descomprimido.
+  const b0cSz=dv.getUint32(hSz,true), b0dSz=dv.getUint32(hSz+4,true);
+  const blk0 =await inflate(by.slice(hSz+12,hSz+12+b0cSz),b0dSz);
+  const players = parseHeader(blk0,new DataView(blk0.buffer,blk0.byteOffset,blk0.byteLength),0,blk0.length);
   const events  = await parseBlocks(by,dv,hSz,nBlk);
 
   return{dur,build,players,events};
@@ -230,7 +238,7 @@ function parseHeader(by,dv,start,hSz){
 
   while(off<hSz-2){
     const rt=by[off];
-    if(rt===0x00||rt===0x16){
+    if(rt===0x16){
       off++;
       const{id,s,nx}=rPl(off); off=nx;
       if(s) pm.set(id,{id,name:s,color:0,ch:'#888',cg:'rgba(136,136,136,.5)',team:0,cpu:false});
@@ -273,14 +281,15 @@ async function parseBlocks(by,dv,hSz,nBlk){
   let off=hSz, tMs=0, blocksOk=0, blocksFail=0;
 
   for(let b=0;b<nBlk;b++){
-    if(off+8>by.length)break;
-    const cSz=dv.getUint16(off,true);
-    off+=8;
+    if(off+12>by.length)break;
+    const cSz=dv.getUint32(off,true);
+    const dSz=dv.getUint32(off+4,true);
+    off+=12;
     if(cSz===0||off+cSz>by.length){off+=cSz;continue;}
 
     let blk;
     try{
-      blk=await inflate(by.slice(off,off+cSz));
+      blk=await inflate(by.slice(off,off+cSz),dSz);
       blocksOk++;
     }catch(e){
       if(blocksFail<3) console.warn(`[W3G] Block ${b} inflate fail:`,e.message,
